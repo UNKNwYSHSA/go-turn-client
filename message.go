@@ -38,10 +38,10 @@ const (
 type STUNMessage struct {
 	Type          string
 	TransactionId []byte
-	Body          []byte
+	Attrs         Attributes
 
-	error      bool
-	attributes Attributes
+	body  []byte
+	error bool
 }
 
 type STUNErrorMessage STUNMessage
@@ -75,32 +75,33 @@ func ParseSTUNMessage(buf []byte) (*STUNMessage, error) {
 	length := binary.BigEndian.Uint16(buf[2:4])
 	b := make([]byte, length)
 	copy(b, buf[20:20+length])
-	message.Body = b
+	message.body = b
 
 	return message, nil
 }
 
-func NewSTUNMessage(t string) STUNMessage {
+func NewSTUNMessage(t string) *STUNMessage {
 	transactionId := make([]byte, 12)
 	rand.Read(transactionId)
 
-	return STUNMessage{Type: t, TransactionId: transactionId}
+	return &STUNMessage{Type: t, TransactionId: transactionId}
 }
 
 func (message *STUNMessage) Attributes() (Attributes, error) {
-	if message.attributes == nil {
-		attrs, err := ParseAttributes(message.Body)
+	if message.Attrs == nil {
+		attrs, err := ParseAttributes(message.body)
 		if err != nil {
 			return attrs, err
 		}
-		message.attributes = attrs
+		message.Attrs = attrs
 	}
 
-	return message.attributes, nil
+	return message.Attrs, nil
 }
 
 func (message *STUNMessage) Encode() []byte {
-	return message.EncodeWithLength(len(message.Body))
+	message.body = message.Attrs.Encode()
+	return message.EncodeWithLength(len(message.body))
 }
 
 func (message *STUNMessage) EncodeWithLength(length int) []byte {
@@ -113,16 +114,21 @@ func (message *STUNMessage) EncodeWithLength(length int) []byte {
 	buf.Write(MessageCookie)
 	buf.Write(message.TransactionId)
 
-	buf.Write(message.Body)
+	if message.body != nil {
+		buf.Write(message.body)
+	} else {
+		buf.Write(message.Attrs.Encode())
+	}
 	return buf.Bytes()
 }
 
-func (message *STUNMessage) Authenticate(realm, username, password []byte) []byte {
+func (message *STUNMessage) MessageIntegrity(realm, username, password []byte) []byte {
 	seed := bytes.Join([][]byte{username, realm, password}, []byte(":"))
 
 	h := md5.Sum(seed)
 	mac := hmac.New(sha1.New, h[:])
-	mac.Write(message.EncodeWithLength(len(message.Body) + 24))
+	message.body = message.Attrs.Encode()
+	mac.Write(message.EncodeWithLength(len(message.body) + 24))
 	return mac.Sum(nil)
 }
 
@@ -135,38 +141,29 @@ func (message *STUNMessage) String() string {
 }
 
 func (message STUNErrorMessage) ErrorMessage() string {
-	attrs, _ := ParseAttributes(message.Body)
-	var errorCodeAttr Attribute
-	for _, attr := range attrs {
-		a, err := TreeAttribute.Find(attr.Key())
-		if err != nil {
-			continue
-		}
-		if a == AttributeErrorCode {
-			errorCodeAttr = attr
-			break
-		}
-	}
-	c := int(errorCodeAttr.Value()[2])
-	num := int(errorCodeAttr.Value()[3])
+	attr := message.findErrorCode()
+	c := int(attr.Value()[2])
+	num := int(attr.Value()[3])
 
-	return fmt.Sprintf("Code: %d, Message: %s", c*100+int(num), string(errorCodeAttr.Value()[4:]))
+	return fmt.Sprintf("Code: %d, Message: %s", c*100+int(num), string(attr.Value()[4:]))
 }
 
 func (message STUNErrorMessage) Code() int {
-	attrs, _ := ParseAttributes(message.Body)
+	attr := message.findErrorCode()
+	c := int(attr.Value()[2])
+	num := int(attr.Value()[3])
+
+	return c*100 + int(num)
+}
+
+func (message STUNErrorMessage) findErrorCode() Attribute {
+	attrs, _ := ParseAttributes(message.body)
 	var errorCodeAttr Attribute
 	for _, attr := range attrs {
-		a, err := TreeAttribute.Find(attr.Key())
-		if err != nil {
-			continue
-		}
-		if a == AttributeErrorCode {
+		if attr.Key().TypeString() == AttributeErrorCode {
 			errorCodeAttr = attr
 			break
 		}
 	}
-	c := int(errorCodeAttr.Value()[2])
-	num := int(errorCodeAttr.Value()[3])
-	return c*100 + int(num)
+	return errorCodeAttr
 }

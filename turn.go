@@ -75,12 +75,9 @@ func Dial(addr string, opt ...DialOption) *Client {
 }
 
 func (client *Client) Allocate() (net.IP, int, error) {
-	attrs := Attributes([]Attribute{NewBaseAttribute(AttributeRequestedTransport, TransportUDP)})
 	message := NewSTUNMessage(MethodAllocate)
-	message.Body = attrs.Encode()
-	buf := message.Encode()
-
-	client.conn.WriteToUDP(buf, client.addr)
+	message.Attrs = Attributes([]Attribute{NewBaseAttribute(AttributeRequestedTransport, TransportUDP)})
+	client.sendRequest(message)
 
 	n, err := client.conn.Read(client.readBuf)
 	if err != nil {
@@ -94,16 +91,18 @@ func (client *Client) Allocate() (net.IP, int, error) {
 	if err != nil {
 		return nil, -1, err
 	}
-	for _, attr := range resAttrs {
-		switch attr.Key().TypeString() {
-		case AttributeNonce:
-			client.nonce = attr.(BaseAttribute).RawValue
-		case AttributeRealm:
-			client.realm = attr.(BaseAttribute).RawValue
+	if res.IsError() && STUNErrorMessage(*res).Code() == ErrorUnauthorized && !client.authRequire {
+		client.authRequire = true
+		for _, attr := range resAttrs {
+			switch attr.Key().TypeString() {
+			case AttributeNonce:
+				client.nonce = attr.(BaseAttribute).RawValue
+			case AttributeRealm:
+				client.realm = attr.(BaseAttribute).RawValue
+			}
 		}
-	}
-	if res.IsError() && STUNErrorMessage(*res).Code() == ErrorUnauthorized {
-		return client.allocateWithAuthenticate()
+
+		return client.Allocate()
 	}
 	if res.IsError() {
 		return nil, -1, errors.New(STUNErrorMessage(*res).ErrorMessage())
@@ -127,20 +126,9 @@ func (client *Client) Allocate() (net.IP, int, error) {
 func (client *Client) RefreshAllocation() error {
 	buf := make([]byte, 4)
 	binary.BigEndian.PutUint32(buf, uint32(600))
-	attrs := Attributes([]Attribute{NewBaseAttribute(AttributeLifetime, buf)})
-	if client.authRequire {
-		attrs = append(attrs, NewBaseAttribute(AttributeUsername, []byte(client.Username)),
-			NewBaseAttribute(AttributeRealm, client.realm),
-			NewBaseAttribute(AttributeNonce, client.nonce))
-	}
 	message := NewSTUNMessage(MethodRefreshAllocation)
-	message.Body = attrs.Encode()
-	if client.authRequire {
-		messageIntegrity := message.Authenticate(client.realm, client.Username, client.Password)
-		attrs = append(attrs, NewBaseAttribute(AttributeMessageIntegrity, messageIntegrity))
-		message.Body = attrs.Encode()
-	}
-	client.conn.WriteToUDP(message.Encode(), client.addr)
+	message.Attrs = Attributes([]Attribute{NewBaseAttribute(AttributeLifetime, buf)})
+	client.sendRequest(message)
 
 	n, err := client.conn.Read(client.readBuf)
 	if err != nil {
@@ -159,23 +147,16 @@ func (client *Client) RefreshAllocation() error {
 
 func (client *Client) CreatePermission(peer net.IP) error {
 	addr := NewXorAddressAttribute(AttributeXorPeerAddress)
-	addr.Family = AddressFamilyV4
+	if len(peer) == 4 {
+		addr.Family = AddressFamilyV4
+	} else {
+		addr.Family = AddressFamilyV6
+	}
 	addr.Address = peer
 
-	attrs := Attributes([]Attribute{addr})
-	if client.authRequire {
-		attrs = append(attrs, NewBaseAttribute(AttributeUsername, []byte(client.Username)),
-			NewBaseAttribute(AttributeRealm, client.realm),
-			NewBaseAttribute(AttributeNonce, client.nonce))
-	}
 	message := NewSTUNMessage(MethodCreatePermission)
-	message.Body = attrs.Encode()
-	if client.authRequire {
-		messageIntegrity := message.Authenticate(client.realm, client.Username, client.Password)
-		attrs = append(attrs, NewBaseAttribute(AttributeMessageIntegrity, messageIntegrity))
-		message.Body = attrs.Encode()
-	}
-	client.conn.WriteToUDP(message.Encode(), client.addr)
+	message.Attrs = Attributes([]Attribute{addr})
+	client.sendRequest(message)
 
 	n, err := client.conn.Read(client.readBuf)
 	if err != nil {
@@ -194,13 +175,16 @@ func (client *Client) CreatePermission(peer net.IP) error {
 
 func (client *Client) Send(peer net.IP, port int, body []byte) {
 	addr := NewXorAddressAttribute(AttributeXorPeerAddress)
-	addr.Family = AddressFamilyV4
+	if len(peer) == 4 {
+		addr.Family = AddressFamilyV4
+	} else {
+		addr.Family = AddressFamilyV6
+	}
 	addr.Address = peer
 	addr.Port = port
 
-	attrs := Attributes([]Attribute{addr, NewBaseAttribute(AttributeDontFragment, nil), NewBaseAttribute(AttributeData, body)}).Encode()
 	message := NewSTUNMessage(MethodSend)
-	message.Body = attrs
+	message.Attrs = Attributes([]Attribute{addr, NewBaseAttribute(AttributeDontFragment, nil), NewBaseAttribute(AttributeData, body)})
 	client.conn.WriteToUDP(message.Encode(), client.addr)
 }
 
@@ -231,7 +215,7 @@ func (client *Client) ChannelBind(channelNumber int) {
 	buf = append(buf, 0x00, 0x00)
 	attrs := Attributes([]Attribute{NewBaseAttribute(AttributeChannelNumber, buf), NewBaseAttribute(AttributeXorPeerAddress, []byte{})}).Encode()
 	message := NewSTUNMessage(MethodChannelBind)
-	message.Body = attrs
+	message.body = attrs
 
 	log.Printf("% x", message.Encode())
 	client.conn.WriteToUDP(message.Encode(), client.addr)
@@ -242,62 +226,23 @@ func (client *Client) ChannelBind(channelNumber int) {
 		log.Print(STUNErrorMessage(*res).ErrorMessage())
 		return
 	}
-	resAttrs, _ := ParseAttributes(res.Body)
-	log.Print(len(resAttrs))
-	log.Print(resAttrs)
+}
+
+func (client *Client) sendRequest(message *STUNMessage) (int, error) {
+	if client.authRequire {
+		message.Attrs = append(message.Attrs,
+			NewBaseAttribute(AttributeUsername, []byte(client.Username)),
+			NewBaseAttribute(AttributeRealm, client.realm),
+			NewBaseAttribute(AttributeNonce, client.nonce))
+		messageIntegrity := message.MessageIntegrity(client.realm, client.Username, client.Password)
+		message.Attrs = append(message.Attrs, NewBaseAttribute(AttributeMessageIntegrity, messageIntegrity))
+	}
+
+	return client.conn.WriteToUDP(message.Encode(), client.addr)
 }
 
 func (client *Client) dispatchMessage(message *STUNMessage) {
 	if message.IsError() {
 		log.Print(STUNErrorMessage(*message).ErrorMessage())
 	}
-}
-
-func (client *Client) allocateWithAuthenticate() (net.IP, int, error) {
-	attrs := Attributes([]Attribute{
-		NewBaseAttribute(AttributeRequestedTransport, TransportUDP),
-		NewBaseAttribute(AttributeUsername, []byte(client.Username)),
-		NewBaseAttribute(AttributeRealm, client.realm),
-		NewBaseAttribute(AttributeNonce, client.nonce),
-	})
-	message := NewSTUNMessage(MethodAllocate)
-	message.Body = attrs.Encode()
-
-	messageIntegrity := message.Authenticate(client.realm, client.Username, client.Password)
-	attrs = append(attrs, NewBaseAttribute(AttributeMessageIntegrity, messageIntegrity))
-	message.Body = attrs.Encode()
-	buf := message.Encode()
-
-	client.conn.WriteToUDP(buf, client.addr)
-
-	n, err := client.conn.Read(client.readBuf)
-	if err != nil {
-		return nil, -1, err
-	}
-	res, err := ParseSTUNMessage(client.readBuf[:n])
-	if err != nil {
-		return nil, -1, err
-	}
-	if res.IsError() {
-		return nil, -1, errors.New(STUNErrorMessage(*res).ErrorMessage())
-	}
-
-	resAttrs, err := res.Attributes()
-	if err != nil {
-		return nil, -1, err
-	}
-	var mappedAddress XorAddressAttribute
-	for _, attr := range resAttrs {
-		if attr.Key().TypeString() == AttributeXorMappedAddress {
-			mappedAddress = attr.(XorAddressAttribute)
-			break
-		}
-	}
-	client.authRequire = true
-
-	err = client.RefreshAllocation()
-	if err != nil {
-		return nil, -1, err
-	}
-	return mappedAddress.Address, mappedAddress.Port, nil
 }

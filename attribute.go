@@ -7,27 +7,6 @@ import (
 	"net"
 )
 
-//var (
-//	AttributeMappedAddress      = []byte{0x00, 0x01} // RFC3489
-//	AttributeSourceAddress      = []byte{0x00, 0x04} // RFC3489
-//	AttributeUsername           = []byte{0x00, 0x06} // RFC5389
-//	AttributeMessageIntegrity   = []byte{0x00, 0x08} // RFC3489
-//	AttributeErrorCode          = []byte{0x00, 0x09} // RFC5389
-//	AttributeUnknown            = []byte{0x00, 0x0a} // RFC3489
-//	AttributeChannelNumber      = []byte{0x00, 0x0c} // RFC5766
-//	AttributeLifetime           = []byte{0x00, 0x0d} // RFC5766
-//	AttributeXorPeerAddress     = []byte{0x00, 0x12} // RFC5766
-//	AttributeData               = []byte{0x00, 0x13} // RFC5766
-//	AttributeRealm              = []byte{0x00, 0x14} // RFC5766
-//	AttributeNonce              = []byte{0x00, 0x15} // RFC5766
-//	AttributeXorRelayedAddress  = []byte{0x00, 0x16} // RFC5766
-//	AttributeRequestedTransport = []byte{0x00, 0x19} // RFC5766
-//	AttributeDontFragment       = []byte{0x00, 0x1a} // RFC5766
-//	AttributeXorMappedAddress   = []byte{0x00, 0x20} // RFC5389
-//	AttributeReservationToken   = []byte{0x00, 0x22} // RFC5766
-//	AttributeSoftware           = []byte{0x80, 0x22} // RFC5389
-//)
-
 const (
 	AttributeMappedAddress      = "MAPPED-ADDRESS"
 	AttributeSourceAddress      = "SOURCE-ADDRESS"
@@ -187,7 +166,12 @@ func ParseXorAddressAttribute(key, value []byte) XorAddressAttribute {
 		a[i] = a[i] ^ MessageCookie[i%4]
 	}
 
-	return XorAddressAttribute{key: key, Port: int(p), Family: AddressFamilyV4, Address: net.IP(a)}
+	family := AddressFamilyV4
+	if len(a) != 4 {
+		family = AddressFamilyV6
+	}
+
+	return XorAddressAttribute{key: key, Port: int(p), Family: AddressFamily(family), Address: net.IP(a)}
 }
 
 func (attr XorAddressAttribute) Key() AttributeKey {
@@ -220,7 +204,9 @@ func (k AttributeKey) String() string {
 }
 
 func (k AttributeKey) TypeString() string {
-	return TreeAttribute[k[0]][k[1]]
-
-	return fmt.Sprintf("% x", []byte(k))
+	s, err := TreeAttribute.Find(k)
+	if err != nil {
+		return fmt.Sprintf("% x", k)
+	}
+	return s
 }
