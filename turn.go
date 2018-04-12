@@ -1,21 +1,10 @@
 package turn
 
 import (
-	"bytes"
-	"crypto/rand"
 	"encoding/binary"
 	"errors"
-	"fmt"
 	"log"
 	"net"
-)
-
-var MessageCookie = []byte{0x21, 0x12, 0xA4, 0x42}
-var (
-	AllocateRequest  = []byte{0x00, 0x03} // RFC5766
-	AllocateSuccess  = []byte{0x01, 0x03} // RFC5766
-	CreatePermission = []byte{0x00, 0x08} // RFC5766
-	ChannelBind      = []byte{0x00, 0x09} // RFC5766
 )
 
 var (
@@ -27,33 +16,53 @@ var (
 )
 
 type Client struct {
-	conn net.Conn
+	conn *net.UDPConn
+	addr *net.UDPAddr
 }
-
-type STUNMessage struct {
-	Type          []byte
-	TransactionId []byte
-	Body          []byte
-}
-
-type STUNErrorMessage STUNMessage
 
 func Dial(addr string) *Client {
-	conn, err := net.Dial("udp", addr)
+	a, _ := net.ResolveUDPAddr("udp", ":")
+	conn, err := net.ListenUDP("udp", a)
 	if err != nil {
 		return nil
 	}
+	turnAddr, _ := net.ResolveUDPAddr("udp", addr)
 
-	return &Client{conn: conn}
+	return &Client{conn: conn, addr: turnAddr}
 }
 
-func (client *Client) Allocate() {
-	attrs := Attributes([]Attribute{{Key: AttributeRequestedTransport, Value: TransportUDP}}).Encode()
-	message := NewSTUNMessage(AllocateRequest)
+func (client *Client) Allocate() (net.IP, int) {
+	attrs := Attributes([]Attribute{BaseAttribute{RawKey: AttributeRequestedTransport, RawValue: TransportUDP}}).Encode()
+	message := NewSTUNMessage(MethodAllocate)
 	message.Body = attrs
 	buf := message.Encode()
 
-	client.conn.Write(buf)
+	client.conn.WriteToUDP(buf, client.addr)
+
+	readBuf := make([]byte, 1500)
+	n, _ := client.conn.Read(readBuf)
+	res, _ := ParseSTUNMessage(readBuf[:n])
+	log.Print(res)
+	log.Print(res.Attributes())
+
+	resAttrs, _ := res.Attributes()
+	var mappedAddress XorAddressAttribute
+	for _, attr := range resAttrs {
+		if attr.Key().TypeString() == "XOR-MAPPED-ADDRESS" {
+			mappedAddress = attr.(XorAddressAttribute)
+			break
+		}
+	}
+	return mappedAddress.Address, mappedAddress.Port
+}
+
+func (client *Client) RefreshAllocation() {
+	buf := make([]byte, 4)
+	binary.BigEndian.PutUint32(buf, uint32(600))
+	attrs := Attributes([]Attribute{BaseAttribute{RawKey: AttributeLifetime, RawValue: buf}}).Encode()
+	message := NewSTUNMessage(MethodRefreshAllocation)
+	message.Body = attrs
+	client.conn.WriteToUDP(message.Encode(), client.addr)
 
 	readBuf := make([]byte, 1500)
 	n, _ := client.conn.Read(readBuf)
@@ -64,8 +73,45 @@ func (client *Client) Allocate() {
 	log.Print(resAttrs)
 }
 
-func (client *Client) CreatePermission() {
+func (client *Client) CreatePermission(peer net.IP) {
+	addr := NewXorAddressAttribute(AttributeXorPeerAddress)
+	addr.Family = AddressFamilyV4
+	addr.Address = peer
 
+	attrs := Attributes([]Attribute{addr}).Encode()
+	message := NewSTUNMessage(MethodCreatePermission)
+	message.Body = attrs
+	client.conn.WriteToUDP(message.Encode(), client.addr)
+
+	readBuf := make([]byte, 1500)
+	n, _ := client.conn.Read(readBuf)
+	log.Printf("% x", readBuf[:n])
+	res, _ := ParseSTUNMessage(readBuf[:n])
+	if res.IsError() {
+		log.Print(STUNErrorMessage(*res).ErrorMessage())
+	} else {
+		log.Print(res.Attributes())
+	}
+}
+
+func (client *Client) Send(peer net.IP, port int, body []byte) {
+	addr := NewXorAddressAttribute(AttributeXorPeerAddress)
+	addr.Family = AddressFamilyV4
+	addr.Address = peer
+	addr.Port = port
+
+	attrs := Attributes([]Attribute{addr, BaseAttribute{RawKey: AttributeDontFragment}, BaseAttribute{RawKey: AttributeData, RawValue: body}}).Encode()
+	message := NewSTUNMessage(MethodSend)
+	message.Body = attrs
+	client.conn.WriteToUDP(message.Encode(), client.addr)
+}
+
+func (client *Client) Data() []byte {
+	readBuf := make([]byte, 1500)
+	n, _ := client.conn.Read(readBuf)
+	log.Printf("% x", readBuf[:n])
+
+	return readBuf[:n]
 }
 
 // channelNumber in the range 16384 through 0x32766
@@ -73,71 +119,21 @@ func (client *Client) ChannelBind(channelNumber int) {
 	buf := make([]byte, 2)
 	binary.BigEndian.PutUint16(buf, uint16(channelNumber))
 	buf = append(buf, 0x00, 0x00)
-	attrs := Attributes([]Attribute{{Key: AttributeChannelNumber, Value: buf}, {Key: AttributeXorPeerAddress, Value: []byte{}}}).Encode()
-	message := NewSTUNMessage(ChannelBind)
+	attrs := Attributes([]Attribute{BaseAttribute{RawKey: AttributeChannelNumber, RawValue: buf}, BaseAttribute{RawKey: AttributeXorPeerAddress, RawValue: []byte{}}}).Encode()
+	message := NewSTUNMessage(MethodChannelBind)
 	message.Body = attrs
 
 	log.Printf("% x", message.Encode())
-	client.conn.Write(message.Encode())
+	client.conn.WriteToUDP(message.Encode(), client.addr)
 
 	readBuf := make([]byte, 1500)
 	n, _ := client.conn.Read(readBuf)
 	res, _ := ParseSTUNMessage(readBuf[:n])
 	if res.IsError() {
-		log.Print(STUNErrorMessage(res).ErrorMessage())
+		log.Print(STUNErrorMessage(*res).ErrorMessage())
 		return
 	}
 	resAttrs, _ := ParseAttributes(res.Body)
 	log.Print(len(resAttrs))
 	log.Print(resAttrs)
-}
-
-func ParseSTUNMessage(buf []byte) (STUNMessage, error) {
-	if buf[0] != 0x01 {
-		return STUNMessage{}, ErrInvalidPacket
-	}
-	message := &STUNMessage{Type: buf[:2], TransactionId: buf[8:20]}
-	length := binary.BigEndian.Uint16(buf[2:4])
-	message.Body = buf[20 : 20+length]
-	return *message, nil
-}
-
-func NewSTUNMessage(t []byte) STUNMessage {
-	transactionId := make([]byte, 12)
-	rand.Read(transactionId)
-
-	return STUNMessage{Type: t, TransactionId: transactionId}
-}
-
-func (message STUNMessage) Encode() []byte {
-	buf := bytes.NewBuffer([]byte{})
-	buf.Write(message.Type)
-	lenBuf := make([]byte, 2)
-	binary.BigEndian.PutUint16(lenBuf, uint16(len(message.Body)))
-	buf.Write(lenBuf)
-
-	buf.Write(MessageCookie)
-	buf.Write(message.TransactionId)
-
-	buf.Write(message.Body)
-	return buf.Bytes()
-}
-
-func (message STUNMessage) IsError() bool {
-	return 0x10&message.Type[1] == 0x10
-}
-
-func (message STUNErrorMessage) ErrorMessage() string {
-	attrs, _ := ParseAttributes(message.Body)
-	var errorCodeAttr Attribute
-	for _, attr := range attrs {
-		if attr.Key[0] == AttributeErrorCode[0] && attr.Key[1] == AttributeErrorCode[1] {
-			errorCodeAttr = attr
-			break
-		}
-	}
-	c := int(errorCodeAttr.Value[2])
-	num := int(errorCodeAttr.Value[3])
-
-	return fmt.Sprintf("Code: %d, Message: %s", c*100+int(num), string(errorCodeAttr.Value[4:]))
 }
