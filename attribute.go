@@ -7,23 +7,69 @@ import (
 	"net"
 )
 
-var (
-	AttributeMappedAddress      = []byte{0x00, 0x01} // RFC3489
-	AttributeSourceAddress      = []byte{0x00, 0x04} // RFC3489
-	AttributeUsername           = []byte{0x00, 0x06} // RFC5389
-	AttributeErrorCode          = []byte{0x00, 0x09} // RFC5389
-	AttributeUnknown            = []byte{0x00, 0x0a} // RFC3489
-	AttributeChannelNumber      = []byte{0x00, 0x0c} // RFC5766
-	AttributeLifetime           = []byte{0x00, 0x0d} // RFC5766
-	AttributeXorPeerAddress     = []byte{0x00, 0x12} // RFC5766
-	AttributeData               = []byte{0x00, 0x13} // RFC5766
-	AttributeXorRelayedAddress  = []byte{0x00, 0x16} // RFC5766
-	AttributeRequestedTransport = []byte{0x00, 0x19} // RFC5766
-	AttributeDontFragment       = []byte{0x00, 0x1a} // RFC5766
-	AttributeXorMappedAddress   = []byte{0x00, 0x20} // RFC5389
-	AttributeReservationToken   = []byte{0x00, 0x22} // RFC5766
-	AttributeSoftware           = []byte{0x80, 0x22} // RFC5389
+//var (
+//	AttributeMappedAddress      = []byte{0x00, 0x01} // RFC3489
+//	AttributeSourceAddress      = []byte{0x00, 0x04} // RFC3489
+//	AttributeUsername           = []byte{0x00, 0x06} // RFC5389
+//	AttributeMessageIntegrity   = []byte{0x00, 0x08} // RFC3489
+//	AttributeErrorCode          = []byte{0x00, 0x09} // RFC5389
+//	AttributeUnknown            = []byte{0x00, 0x0a} // RFC3489
+//	AttributeChannelNumber      = []byte{0x00, 0x0c} // RFC5766
+//	AttributeLifetime           = []byte{0x00, 0x0d} // RFC5766
+//	AttributeXorPeerAddress     = []byte{0x00, 0x12} // RFC5766
+//	AttributeData               = []byte{0x00, 0x13} // RFC5766
+//	AttributeRealm              = []byte{0x00, 0x14} // RFC5766
+//	AttributeNonce              = []byte{0x00, 0x15} // RFC5766
+//	AttributeXorRelayedAddress  = []byte{0x00, 0x16} // RFC5766
+//	AttributeRequestedTransport = []byte{0x00, 0x19} // RFC5766
+//	AttributeDontFragment       = []byte{0x00, 0x1a} // RFC5766
+//	AttributeXorMappedAddress   = []byte{0x00, 0x20} // RFC5389
+//	AttributeReservationToken   = []byte{0x00, 0x22} // RFC5766
+//	AttributeSoftware           = []byte{0x80, 0x22} // RFC5389
+//)
+
+const (
+	AttributeMappedAddress      = "MAPPED-ADDRESS"
+	AttributeSourceAddress      = "SOURCE-ADDRESS"
+	AttributeUsername           = "USERNAME"
+	AttributeMessageIntegrity   = "MESSAGE-INTEGRITY"
+	AttributeErrorCode          = "ERROR-CODE"
+	AttributeUnknown            = "UNKNOWN"
+	AttributeChannelNumber      = "CHANNEL-NUMBER"
+	AttributeLifetime           = "LIFETIME"
+	AttributeXorPeerAddress     = "XOR-PEER-ADDRESS"
+	AttributeData               = "DATA"
+	AttributeRealm              = "REALM"
+	AttributeNonce              = "NONCE"
+	AttributeXorRelayedAddress  = "XOR-RELAYED-ADDRESS"
+	AttributeRequestedTransport = "REQUESTED-TRANSPORT"
+	AttributeDontFragment       = "DONT-FRAGMENT"
+	AttributeXorMappedAddress   = "XOR-MAPPED-ADDRESS"
+	AttributeReservationToken   = "RESERVATION-TOKEN"
+	AttributeSoftware           = "SOFTWARE"
 )
+
+var AttributeRegistry = map[string][]byte{
+	AttributeMappedAddress:      {0x00, 0x01},
+	AttributeSourceAddress:      {0x00, 0x04}, // RFC3489
+	AttributeUsername:           {0x00, 0x06}, // RFC5389
+	AttributeMessageIntegrity:   {0x00, 0x08}, // RFC3489
+	AttributeErrorCode:          {0x00, 0x09}, // RFC5389
+	AttributeUnknown:            {0x00, 0x0a}, // RFC3489
+	AttributeChannelNumber:      {0x00, 0x0c}, // RFC5766
+	AttributeLifetime:           {0x00, 0x0d}, // RFC5766
+	AttributeXorPeerAddress:     {0x00, 0x12}, // RFC5766
+	AttributeData:               {0x00, 0x13}, // RFC5766
+	AttributeRealm:              {0x00, 0x14}, // RFC5766
+	AttributeNonce:              {0x00, 0x15}, // RFC5766
+	AttributeXorRelayedAddress:  {0x00, 0x16}, // RFC5766
+	AttributeRequestedTransport: {0x00, 0x19}, // RFC5766
+	AttributeDontFragment:       {0x00, 0x1a}, // RFC5766
+	AttributeXorMappedAddress:   {0x00, 0x20}, // RFC5389
+	AttributeReservationToken:   {0x00, 0x22}, // RFC5766
+	AttributeSoftware:           {0x80, 0x22}, // RFC5389
+}
+var TreeAttribute TwoBytesTree
 
 const (
 	AddressFamilyV4 = 1 + iota
@@ -53,6 +99,17 @@ type Attribute interface {
 
 type Attributes []Attribute
 
+func init() {
+	TreeAttribute = make(map[byte]map[byte]string)
+
+	for k, v := range AttributeRegistry {
+		if _, ok := TreeAttribute[v[0]]; ok == false {
+			TreeAttribute[v[0]] = make(map[byte]string)
+		}
+		TreeAttribute[v[0]][v[1]] = k
+	}
+}
+
 func ParseAttributes(buf []byte) (Attributes, error) {
 	attrs := make([]Attribute, 0)
 	for {
@@ -60,9 +117,13 @@ func ParseAttributes(buf []byte) (Attributes, error) {
 			break
 		}
 
-		length := binary.BigEndian.Uint16(buf[2:4])
+		length := int(binary.BigEndian.Uint16(buf[2:4]))
+		padding := 0
+		if length%4 != 0 {
+			padding = 4 - length%4
+		}
 		switch AttributeKey(buf[:2]).TypeString() {
-		case "XOR-RELAYED-ADDRESS", "XOR-MAPPED-ADDRESS":
+		case AttributeXorRelayedAddress, AttributeXorMappedAddress, AttributeXorPeerAddress:
 			attr := ParseXorAddressAttribute(buf[:2], buf[4:4+length])
 			attrs = append(attrs, attr)
 		default:
@@ -71,7 +132,7 @@ func ParseAttributes(buf []byte) (Attributes, error) {
 			attr.RawValue = buf[4 : 4+length]
 			attrs = append(attrs, *attr)
 		}
-		buf = buf[4+length:]
+		buf = buf[4+length+padding:]
 	}
 
 	return Attributes(attrs), nil
@@ -92,20 +153,30 @@ func (attrs Attributes) Encode() []byte {
 	return buf.Bytes()
 }
 
+func NewBaseAttribute(key string, value []byte) *BaseAttribute {
+	return &BaseAttribute{RawKey: AttributeRegistry[key], RawValue: value}
+}
+
 func (attr BaseAttribute) Key() AttributeKey {
 	return attr.RawKey
 }
 
 func (attr BaseAttribute) Value() []byte {
-	return attr.RawValue
+	if len(attr.RawValue)%4 != 0 {
+		padding := 4 - len(attr.RawValue)%4
+		p := make([]byte, padding)
+		return append(attr.RawValue, p...)
+	} else {
+		return attr.RawValue
+	}
 }
 
 func (attr BaseAttribute) String() string {
 	return fmt.Sprintf("RawKey: %s RawValue: % x", attr.RawKey, string(attr.RawValue))
 }
 
-func NewXorAddressAttribute(key []byte) *XorAddressAttribute {
-	return &XorAddressAttribute{key: key}
+func NewXorAddressAttribute(key string) *XorAddressAttribute {
+	return &XorAddressAttribute{key: AttributeRegistry[key]}
 }
 
 func ParseXorAddressAttribute(key, value []byte) XorAddressAttribute {
@@ -149,45 +220,7 @@ func (k AttributeKey) String() string {
 }
 
 func (k AttributeKey) TypeString() string {
-	if k[0] == AttributeXorRelayedAddress[0] && k[1] == AttributeXorRelayedAddress[1] {
-		return "XOR-RELAYED-ADDRESS"
-	}
-	if k[0] == AttributeXorMappedAddress[0] && k[1] == AttributeXorMappedAddress[1] {
-		return "XOR-MAPPED-ADDRESS"
-	}
-	if k[0] == AttributeLifetime[0] && k[1] == AttributeLifetime[1] {
-		return "LIFETIME"
-	}
-	if k[0] == AttributeReservationToken[0] && k[1] == AttributeReservationToken[1] {
-		return "RESERVATION-TOKEN"
-	}
-	if k[0] == AttributeSoftware[0] && k[1] == AttributeSoftware[1] {
-		return "SOFTWARE"
-	}
-	if k[0] == AttributeUsername[0] && k[1] == AttributeUsername[1] {
-		return "USERNAME"
-	}
-	if k[0] == AttributeChannelNumber[0] && k[1] == AttributeChannelNumber[1] {
-		return "CHANNEL-NUMBER"
-	}
-	if k[0] == AttributeErrorCode[0] && k[1] == AttributeErrorCode[1] {
-		return "ERROR-CODE"
-	}
-	if k[0] == AttributeXorPeerAddress[0] && k[1] == AttributeXorPeerAddress[1] {
-		return "XOR-PEER-ADDRESS"
-	}
-	if k[0] == AttributeMappedAddress[0] && k[1] == AttributeMappedAddress[1] {
-		return "MAPPED-ADDRESS"
-	}
-	if k[0] == AttributeUnknown[0] && k[1] == AttributeUnknown[1] {
-		return "UNKNOWN-ATTRIBUTES"
-	}
-	if k[0] == AttributeSourceAddress[0] && k[1] == AttributeSourceAddress[1] {
-		return "SOURCE-ADDRESS"
-	}
-	if k[0] == AttributeDontFragment[0] && k[1] == AttributeDontFragment[1] {
-		return "DONT-FRAGMENT"
-	}
+	return TreeAttribute[k[0]][k[1]]
 
 	return fmt.Sprintf("% x", []byte(k))
 }

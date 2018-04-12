@@ -2,22 +2,32 @@ package main
 
 import (
 	"log"
+	"os"
 	"time"
 
 	"github.com/f110/go-turn-client"
 )
 
 func main() {
-	peerClient := turn.Dial("127.0.0.1:3478")
-	peerIP, peerPort := peerClient.Allocate()
+	opt := turn.WithLongTermCredential("1523534350:1", "QpYNHtXvxhSnUZp1Ydd0HlJ7JOk=")
+	peerClient := turn.Dial("127.0.0.1:3478", opt)
+	peerIP, peerPort, err := peerClient.Allocate()
+	if err != nil {
+		panic(err)
+	}
 	peerClient.RefreshAllocation()
+	go peerClient.StartReading()
 
 	go func() {
-		log.Printf("Peer: %s", string(peerClient.Data()))
+		log.Printf("Peer: %s", string(peerClient.Read()))
+		os.Exit(0)
 	}()
 
-	client := turn.Dial("127.0.0.1:3478")
-	clientIP, clientPort := client.Allocate()
+	client := turn.Dial("127.0.0.1:3478", opt)
+	clientIP, clientPort, err := client.Allocate()
+	if err != nil {
+		panic(err)
+	}
 	_ = clientIP
 	_ = clientPort
 	client.RefreshAllocation()
