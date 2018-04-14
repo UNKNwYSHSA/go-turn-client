@@ -15,8 +15,6 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	peerClient.RefreshAllocation()
-	go peerClient.StartReading()
 
 	go func() {
 		log.Printf("Peer: %s", string(peerClient.Read()))
@@ -30,9 +28,9 @@ func main() {
 	}
 	_ = clientIP
 	_ = clientPort
-	client.RefreshAllocation()
 	client.CreatePermission(peerIP)
 	client.Send(peerIP, peerPort, []byte("test"))
 
 	time.Sleep(1 * time.Second)
+	client.Shutdown()
 }

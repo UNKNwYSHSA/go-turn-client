@@ -188,24 +188,19 @@ func (client *Client) Send(peer net.IP, port int, body []byte) {
 	client.conn.WriteToUDP(message.Encode(), client.addr)
 }
 
-func (client *Client) StartReading() {
-	for {
-		n, err := client.conn.Read(client.readBuf)
-		if err != nil {
-			break
-		}
+func (client *Client) Read() ([]byte, error) {
+	n, err := client.conn.Read(client.readBuf)
+	if err != nil {
+		return nil, err
+	}
 
+	for {
 		res, err := ParseSTUNMessage(client.readBuf[:n])
 		if err != nil {
-			client.readChan <- client.readBuf[:n]
-			return
+			return client.readBuf[:n], nil
 		}
 		client.dispatchMessage(res)
 	}
-}
-
-func (client *Client) Read() []byte {
-	return <-client.readChan
 }
 
 // channelNumber in the range 16384 through 0x32766
@@ -226,6 +221,10 @@ func (client *Client) ChannelBind(channelNumber int) {
 		log.Print(STUNErrorMessage(*res).ErrorMessage())
 		return
 	}
+}
+
+func (client *Client) Shutdown() error {
+	return client.conn.Close()
 }
 
 func (client *Client) sendRequest(message *STUNMessage) (int, error) {
