@@ -17,7 +17,12 @@ func main() {
 	}
 
 	go func() {
-		log.Printf("Peer: %s", string(peerClient.Read()))
+		buf, err := peerClient.Read()
+		if err != nil {
+			log.Print(err)
+			os.Exit(1)
+		}
+		log.Printf("Peer: %s", string(buf))
 		os.Exit(0)
 	}()
 
