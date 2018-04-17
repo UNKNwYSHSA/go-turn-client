@@ -108,10 +108,10 @@ func (client *Client) Allocate() (net.IP, int, error) {
 		return nil, -1, errors.New(STUNErrorMessage(*res).ErrorMessage())
 	}
 
-	var mappedAddress XorAddressAttribute
+	var relayedAddress XorAddressAttribute
 	for _, attr := range resAttrs {
-		if attr.Key().TypeString() == AttributeXorMappedAddress {
-			mappedAddress = attr.(XorAddressAttribute)
+		if attr.Key().TypeString() == AttributeXorRelayedAddress {
+			relayedAddress = attr.(XorAddressAttribute)
 			break
 		}
 	}
@@ -120,7 +120,7 @@ func (client *Client) Allocate() (net.IP, int, error) {
 	if err != nil {
 		return nil, -1, err
 	}
-	return mappedAddress.Address, mappedAddress.Port, nil
+	return relayedAddress.Address, relayedAddress.Port, nil
 }
 
 func (client *Client) RefreshAllocation() error {
@@ -199,28 +199,38 @@ func (client *Client) Read() ([]byte, error) {
 		if err != nil {
 			return client.readBuf[:n], nil
 		}
-		client.dispatchMessage(res)
+		data := client.dispatchMessage(res)
+		if len(data) > 0 {
+			return data, nil
+		}
 	}
 }
 
-// channelNumber in the range 16384 through 0x32766
-func (client *Client) ChannelBind(channelNumber int) {
-	buf := make([]byte, 2)
-	binary.BigEndian.PutUint16(buf, uint16(channelNumber))
-	buf = append(buf, 0x00, 0x00)
-	attrs := Attributes([]Attribute{NewBaseAttribute(AttributeChannelNumber, buf), NewBaseAttribute(AttributeXorPeerAddress, []byte{})}).Encode()
+// channelNumber in the range 16384 through 32766
+func (client *Client) ChannelBind(channelNumber int, peerIp net.IP, peerPort int) error {
+	addr := NewXorAddressAttribute(AttributeXorPeerAddress)
+	addr.Address = peerIp
+	addr.Port = peerPort
+	buf := make([]byte, 4)
+	binary.BigEndian.PutUint16(buf[0:2], uint16(channelNumber))
+
 	message := NewSTUNMessage(MethodChannelBind)
-	message.body = attrs
+	message.Attrs = Attributes([]Attribute{addr, NewBaseAttribute(AttributeChannelNumber, buf)})
+	client.sendRequest(message)
 
-	log.Printf("% x", message.Encode())
-	client.conn.WriteToUDP(message.Encode(), client.addr)
-
-	n, _ := client.conn.Read(client.readBuf)
-	res, _ := ParseSTUNMessage(client.readBuf[:n])
-	if res.IsError() {
-		log.Print(STUNErrorMessage(*res).ErrorMessage())
-		return
+	n, err := client.conn.Read(client.readBuf)
+	if err != nil {
+		return err
 	}
+	res, err := ParseSTUNMessage(client.readBuf[:n])
+	if err != nil {
+		return err
+	}
+	if res.IsError() {
+		return errors.New(STUNErrorMessage(*res).ErrorMessage())
+	}
+
+	return nil
 }
 
 func (client *Client) Shutdown() error {
@@ -240,8 +250,23 @@ func (client *Client) sendRequest(message *STUNMessage) (int, error) {
 	return client.conn.WriteToUDP(message.Encode(), client.addr)
 }
 
-func (client *Client) dispatchMessage(message *STUNMessage) {
+func (client *Client) dispatchMessage(message *STUNMessage) []byte {
 	if message.IsError() {
 		log.Print(STUNErrorMessage(*message).ErrorMessage())
 	}
+
+	switch message.Type {
+	case MethodData:
+		attrs, err := message.Attributes()
+		if err != nil {
+			return nil
+		}
+		for _, attr := range attrs {
+			if attr.Key().TypeString() == AttributeData {
+				return attr.Value()
+			}
+		}
+	}
+
+	return nil
 }

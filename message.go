@@ -58,12 +58,9 @@ func init() {
 }
 
 func ParseSTUNMessage(buf []byte) (*STUNMessage, error) {
-	if buf[0] != 0x01 {
-		return nil, ErrInvalidPacket
-	}
-	error := 0x10&buf[1] == 0x10
-	buf[0] ^= 0x01
-	buf[1] ^= 0x10
+	e := 0x01&buf[0] == 0x01 && 0x10&buf[1] == 0x10
+	buf[0] &^= 0x01
+	buf[1] &^= 0x10
 	t, err := TreeMethod.Find(buf[:2])
 	if err != nil {
 		return nil, err
@@ -71,7 +68,7 @@ func ParseSTUNMessage(buf []byte) (*STUNMessage, error) {
 
 	tBuf := make([]byte, 12)
 	copy(tBuf, buf[8:20])
-	message := &STUNMessage{Type: t, TransactionId: tBuf, error: error}
+	message := &STUNMessage{Type: t, TransactionId: tBuf, error: e}
 	length := binary.BigEndian.Uint16(buf[2:4])
 	b := make([]byte, length)
 	copy(b, buf[20:20+length])
